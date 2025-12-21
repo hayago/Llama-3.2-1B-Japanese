@@ -1,0 +1,17 @@
+wandb/
+scripts/accelerate_config.yml
+Llama-3.2-1B-Japanese/
+.claude/
+*.swp
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+

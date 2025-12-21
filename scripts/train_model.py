@@ -1,0 +1,243 @@
+import os
+import torch
+import sentencepiece as spm
+from accelerate import Accelerator
+from datasets import load_dataset
+from huggingface_hub import snapshot_download
+from transformers import LlamaForCausalLM, LlamaConfig
+from transformers import DefaultDataCollator
+from transformers import Trainer, TrainingArguments, TrainerCallback
+
+
+# Load the sentencepiece model
+sp = spm.SentencePieceProcessor(model_file="sentencepiece/out.model")
+
+
+def preprocess(examples) -> dict:
+    # Encode the text into ids and add BOS and EOS
+    all_ids = []
+    for ids in sp.encode_as_ids(examples["text"]):
+        all_ids.extend([sp.bos_id()] + ids + [sp.eos_id()])
+
+    # Pack the all_ids into chunks of context_length
+    context_length = 2048
+    total_length = (len(all_ids) // context_length) * context_length
+    chunks = [
+        all_ids[i : i + context_length] for i in range(0, total_length, context_length)
+    ]
+
+    return {
+        "input_ids": chunks,
+        "labels": chunks.copy(),  # labels are the same as input_ids for causal language modeling
+    }
+
+
+def prepare_dataset():
+    # Load the dataset
+    dataset_name = "hayago/llm-pretrain-dataset-5B-japanese"
+    dataset = load_dataset(dataset_name)
+
+    train_dataset = dataset["train"]
+
+    # Preprocess the dataset
+    # Use fixed batch_size to ensure consistent chunk counts per batch
+    packed_dataset_train = train_dataset.map(
+        preprocess, batched=True, remove_columns=train_dataset.column_names, drop_last_batch=True
+    )
+
+    return packed_dataset_train
+
+
+def log_training_info(num_samples, training_args):
+    batch_size = training_args.per_device_train_batch_size
+    gradient_accumulation_steps = training_args.gradient_accumulation_steps
+    num_epochs = training_args.num_train_epochs
+    steps_per_epoch = num_samples // (batch_size * gradient_accumulation_steps)
+    total_steps = steps_per_epoch * num_epochs
+    print(f"Number of samples: {num_samples}")
+    print(f"Batch size: {batch_size}")
+    print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    print(f"Number of epochs: {num_epochs}")
+    print(f"Steps per epoch: {steps_per_epoch}")
+    print(f"Total steps: {total_steps}")
+
+
+# Evaluation prompts for text generation
+EVAL_PROMPTS = [
+    "今日は朝から雨が降っていて、",
+    "静かな図書館の中で、私は一冊の古い本を開いた。",
+    "夜が更けてきた。街の明かりは、",
+    "この町では、季節が変わるたびに、人々の暮らし方や考え方が少しずつ変化していくのだが、",
+    "遠くで鐘の音が鳴り始めたとき、",
+    "春の訪れとともに",
+    "科学技術の進歩により、",
+    "彼女は窓の外を見つめていた。",
+    "歴史を紐解くと、",
+    "未来への希望を胸に",
+    "朝の光が差し込む窓辺で、",
+    "古い写真を見つめながら",
+    "雪が静かに降り始めた夜に",
+    "友人からの手紙を読んでいると、",
+    "海辺を歩いていたとき、",
+    "新しい季節の始まりを感じて",
+    "図書館の奥で見つけた本には、",
+    "夕暮れ時の街角で",
+    "母の作った料理の香りが",
+    "電車の窓から見える風景は",
+]
+
+
+class GenerationCallback(TrainerCallback):
+    """Callback to generate evaluation texts at checkpoint save time."""
+
+    def __init__(self, sp_processor, accelerator):
+        self.sp = sp_processor
+        self.accelerator = accelerator
+
+    def on_save(self, args, state, control, model=None, **kwargs):
+        """Generate texts when checkpoint is saved."""
+        # Only run on main process
+        if not self.accelerator.is_main_process:
+            return
+
+        if model is None:
+            raise Exception("Model is None")
+
+        print("\n" + "=" * 80)
+        print(f"Generating evaluation texts at step {state.global_step}")
+        print("=" * 80)
+
+        model.eval()
+        with torch.no_grad():
+            for i, prompt in enumerate(EVAL_PROMPTS, 1):
+                try:
+                    # Encode the prompt
+                    input_ids = self.sp.encode_as_ids(prompt)
+                    input_ids = [self.sp.bos_id()] + input_ids
+                    input_ids_tensor = (
+                        torch.tensor(input_ids).unsqueeze(0).to(model.device)
+                    )
+
+                    # Generate text
+                    outputs = model.generate(
+                        input_ids_tensor,
+                        max_new_tokens=100,
+                    )
+
+                    # Decode the generated text
+                    generated_ids = outputs[0].cpu().tolist()
+                    generated_text = self.sp.decode(generated_ids)
+
+                    print(f"\n[{i}/{len(EVAL_PROMPTS)}] Prompt: {prompt}")
+                    print(f"Generated: {generated_text}")
+                    print("-" * 80)
+                except Exception as e:
+                    print(f"Error generating text for prompt {i}: {e}")
+
+        model.train()
+        print("=" * 80 + "\n")
+
+
+def main():
+    # Check if resume is enabled via environment variable
+    resume = os.environ.get("RESUME", "") == "1"
+
+    # Prepare the dataset with caching for distributed training
+    acc = Accelerator()
+    if acc.is_main_process:
+        # Main process creates dataset cache
+        packed_dataset_train = prepare_dataset()
+    acc.wait_for_everyone()
+    if not acc.is_main_process:
+        # Other processes load from cache
+        packed_dataset_train = prepare_dataset()
+
+    # Initialize or load the model
+    checkpoint_dir = "./checkpoints"
+    if resume:
+        # Clone repository from Hugging Face Hub (only main process)
+        if acc.is_main_process:
+            print(
+                f"Downloading checkpoint from {os.environ.get('RESUME_FROM_CHECKPOINT')}..."
+            )
+            snapshot_download(
+                repo_id="hayago/Veloce-100M",
+                allow_patterns=os.environ.get("RESUME_FROM_CHECKPOINT") + "/**",
+                local_dir=checkpoint_dir,
+                local_dir_use_symlinks=False,
+            )
+            print("Checkpoint downloaded successfully")
+        acc.wait_for_everyone()
+        model = LlamaForCausalLM.from_pretrained(
+            os.path.join(checkpoint_dir, os.environ.get("RESUME_FROM_CHECKPOINT"))
+        )
+    else:
+        model_config = LlamaConfig(
+            hidden_size=512,
+            num_hidden_layers=9,
+            num_attention_heads=8,
+            num_key_value_heads=2,
+            intermediate_size=4096,
+            vocab_size=sp.vocab_size(),
+            bos_token_id=sp.bos_id(),
+            eos_token_id=sp.eos_id(),
+            hidden_act="silu",
+            attention_dropout=0.0,
+            attention_bias=False,
+            initializer_range=0.02,
+            rope_theta=500000.0,
+            max_position_embeddings=2048,
+            rms_norm_eps=1e-5,
+        )
+        model = LlamaForCausalLM(model_config)
+
+        # Log model parameter count
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Total parameters: {total_params:,}")
+
+    # Training arguments
+    training_args = TrainingArguments(
+        output_dir="./Veloce-100M",
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=8,
+        warmup_ratio=0.05,
+        lr_scheduler_type="cosine",
+        weight_decay=0.001,
+        bf16=True,
+        logging_strategy="steps",
+        logging_steps=50,
+        logging_first_step=True,
+        num_train_epochs=1,
+        learning_rate=1e-4,
+        save_steps=500,
+        report_to="wandb",
+        push_to_hub=True,
+        hub_strategy="all_checkpoints",
+        eval_strategy="no",
+    )
+
+    if acc.is_main_process:
+        log_training_info(len(packed_dataset_train), training_args)
+
+    # Create generation callback
+    generation_callback = GenerationCallback(sp, acc)
+
+    # Train the model
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=packed_dataset_train,
+        data_collator=DefaultDataCollator(),
+        callbacks=[generation_callback],
+    )
+    trainer.train(
+        resume_from_checkpoint=os.path.join(
+            checkpoint_dir, os.environ.get("RESUME_FROM_CHECKPOINT")
+        )
+        if resume
+        else None
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,26 @@
+base_job_name: veloce-1b-training-job
+compute_environment: AMAZON_SAGEMAKER
+distributed_type: DATA_PARALLEL
+ec2_instance_type: ml.p4d.24xlarge
+image_uri: 763104351884.dkr.ecr.us-east-1.amazonaws.com/huggingface-pytorch-training:2.5.1-transformers4.49.0-gpu-py311-cu124-ubuntu22.04
+enable_cpu_affinity: false
+gpu_ids: all
+iam_role_name: sagemaker-training-job-role-for-llama-3-2-1b-japanese
+mixed_precision: bf16
+num_machines: 1
+profile: XXXXX
+py_version: py311
+pytorch_version: 2.5.1
+region: us-east-1
+transformers_version: 4.49.0
+use_cpu: false
+additional_args:
+  use_spot_instances: True
+  max_run: 360000 # 100 hours
+  max_wait: 360000 # Must be greater than or equal to max_run when using spot instances
+  environment:
+    HF_TOKEN: "XXXXX" # Don't commit this to the repository
+    WANDB_API_KEY: "XXXXX" # Don't commit this to the repository
+    WANDB_PROJECT: "veloce-1b-training-job"
+    RESUME: "0" # 0: No resume, 1: Resume
+    # RESUME_FROM_CHECKPOINT: "checkpoint-30"
