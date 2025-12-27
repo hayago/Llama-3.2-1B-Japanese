@@ -19,3 +19,4 @@ wikipedia_dataset = DatasetDict(
 )
 
 wikipedia_dataset.save_to_disk("data/wikipedia_dataset")
+# wikipedia_dataset.push_to_hub("hayago/cohere-wikipedia-22-12-ja-text")
