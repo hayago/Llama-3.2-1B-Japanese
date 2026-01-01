@@ -22,3 +22,4 @@ additional_args:
     HF_TOKEN: "XXXXX" # Don't commit this to the repository
     WANDB_API_KEY: "XXXXX" # Don't commit this to the repository
     WANDB_PROJECT: "veloce-1b-training-job"
+    RESUME: "0" # 0: No resume, 1: Resume

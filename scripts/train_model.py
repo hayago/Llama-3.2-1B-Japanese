@@ -1,20 +1,16 @@
-import argparse
+import os
 import sentencepiece as spm
 from accelerate import Accelerator
 from datasets import load_dataset
+from huggingface_hub import snapshot_download
 from transformers import LlamaForCausalLM, AutoConfig
 from transformers import DefaultDataCollator
 from transformers import Trainer, TrainingArguments
+from transformers.trainer_utils import get_last_checkpoint
 
 
 # Load the sentencepiece model
 sp = spm.SentencePieceProcessor(model_file="sentencepiece/out.model")
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", action="store_true")
-    return parser.parse_args()
 
 
 def preprocess(examples) -> dict:
@@ -73,7 +69,8 @@ def log_training_info(num_samples, training_args):
 
 
 def main():
-    args = parse_args()
+    # Check if resume is enabled via environment variable
+    resume = os.environ.get("RESUME", "") == "1"
 
     # Prepare the dataset with caching for distributed training
     acc = Accelerator()
@@ -85,9 +82,24 @@ def main():
         # Other processes load from cache
         packed_dataset_train, packed_dataset_val = prepare_dataset()
 
+    # Determine output directory
+    output_dir = "./Veloce-1B"
+
     # Initialize or load the model
-    if args.resume:
-        model = LlamaForCausalLM.from_pretrained("Veloce-1B")
+    checkpoint = None
+    if resume:
+        # Clone repository from Hugging Face Hub (only main process)
+        if acc.is_main_process:
+            print("Cloning repository...")
+            snapshot_download(
+                repo_id="hayago/Veloce-1B",
+                local_dir=output_dir,
+                local_dir_use_symlinks=False,
+            )
+            print("Repository cloned successfully")
+        acc.wait_for_everyone()
+        checkpoint = get_last_checkpoint(output_dir)
+        model = LlamaForCausalLM.from_pretrained(checkpoint)
     else:
         model_config = AutoConfig.from_pretrained(
             "meta-llama/Llama-3.2-1B",
@@ -99,7 +111,7 @@ def main():
 
     # Training arguments
     training_args = TrainingArguments(
-        output_dir="Veloce-1B",
+        output_dir=output_dir,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=64,
@@ -112,7 +124,7 @@ def main():
         eval_strategy="steps",
         logging_first_step=True,
         eval_steps=10,  # -> 100
-        num_train_epochs=5,  # -> 1
+        num_train_epochs=5,  # -> 5
         learning_rate=5e-4,
         save_steps=10,  # -> 100
         report_to="wandb",
@@ -120,7 +132,8 @@ def main():
         hub_strategy="all_checkpoints",
     )
 
-    log_training_info(len(packed_dataset_train), training_args)
+    if acc.is_main_process:
+        log_training_info(len(packed_dataset_train), training_args)
 
     # Train the model
     trainer = Trainer(
@@ -130,7 +143,7 @@ def main():
         eval_dataset=packed_dataset_val,
         data_collator=DefaultDataCollator(),
     )
-    trainer.train(resume_from_checkpoint=args.resume)
+    trainer.train(resume_from_checkpoint=checkpoint if resume else None)
 
 
 if __name__ == "__main__":
