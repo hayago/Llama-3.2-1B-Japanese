@@ -191,7 +191,7 @@ def main():
         logging_strategy="steps",
         logging_steps=20,
         logging_first_step=True,
-        num_train_epochs=5,
+        num_train_epochs=10,
         learning_rate=1e-4,
         save_steps=100,
         report_to="wandb",
