@@ -1,12 +1,12 @@
 import os
+import torch
 import sentencepiece as spm
 from accelerate import Accelerator
 from datasets import load_dataset
 from huggingface_hub import snapshot_download
 from transformers import LlamaForCausalLM, AutoConfig
 from transformers import DefaultDataCollator
-from transformers import Trainer, TrainingArguments
-from transformers.trainer_utils import get_last_checkpoint
+from transformers import Trainer, TrainingArguments, TrainerCallback
 
 
 # Load the sentencepiece model
@@ -39,19 +39,12 @@ def prepare_dataset():
 
     train_dataset = wikipedia_dataset["train"]
 
-    # Use half of the validation dataset for evaluation
-    val_dataset_size = len(wikipedia_dataset["validation"])
-    val_dataset = wikipedia_dataset["validation"].select(range(val_dataset_size // 2))
-
     # Preprocess the dataset
     packed_dataset_train = train_dataset.map(
         preprocess, batched=True, remove_columns=["text"]
     )
-    packed_dataset_val = val_dataset.map(
-        preprocess, batched=True, remove_columns=["text"]
-    )
 
-    return packed_dataset_train, packed_dataset_val
+    return packed_dataset_train
 
 
 def log_training_info(num_samples, training_args):
@@ -68,6 +61,82 @@ def log_training_info(num_samples, training_args):
     print(f"Total steps: {total_steps}")
 
 
+# Evaluation prompts for text generation
+EVAL_PROMPTS = [
+    "今日は朝から雨が降っていて、",
+    "静かな図書館の中で、私は一冊の古い本を開いた。",
+    "夜が更けてきた。街の明かりは、",
+    "この町では、季節が変わるたびに、人々の暮らし方や考え方が少しずつ変化していくのだが、",
+    "遠くで鐘の音が鳴り始めたとき、",
+    "春の訪れとともに",
+    "科学技術の進歩により、",
+    "彼女は窓の外を見つめていた。",
+    "歴史を紐解くと、",
+    "未来への希望を胸に",
+    "朝の光が差し込む窓辺で、",
+    "古い写真を見つめながら",
+    "雪が静かに降り始めた夜に",
+    "友人からの手紙を読んでいると、",
+    "海辺を歩いていたとき、",
+    "新しい季節の始まりを感じて",
+    "図書館の奥で見つけた本には、",
+    "夕暮れ時の街角で",
+    "母の作った料理の香りが",
+    "電車の窓から見える風景は",
+]
+
+
+class GenerationCallback(TrainerCallback):
+    """Callback to generate evaluation texts at checkpoint save time."""
+
+    def __init__(self, sp_processor, accelerator):
+        self.sp = sp_processor
+        self.accelerator = accelerator
+
+    def on_save(self, args, state, control, model=None, **kwargs):
+        """Generate texts when checkpoint is saved."""
+        # Only run on main process
+        if not self.accelerator.is_main_process:
+            return
+
+        if model is None:
+            raise Exception("Model is None")
+
+        print("\n" + "=" * 80)
+        print(f"Generating evaluation texts at step {state.global_step}")
+        print("=" * 80)
+
+        model.eval()
+        with torch.no_grad():
+            for i, prompt in enumerate(EVAL_PROMPTS, 1):
+                try:
+                    # Encode the prompt
+                    input_ids = self.sp.encode_as_ids(prompt)
+                    input_ids = [self.sp.bos_id()] + input_ids
+                    input_ids_tensor = (
+                        torch.tensor(input_ids).unsqueeze(0).to(model.device)
+                    )
+
+                    # Generate text
+                    outputs = model.generate(
+                        input_ids_tensor,
+                        max_new_tokens=100,
+                    )
+
+                    # Decode the generated text
+                    generated_ids = outputs[0].cpu().tolist()
+                    generated_text = self.sp.decode(generated_ids)
+
+                    print(f"\n[{i}/{len(EVAL_PROMPTS)}] Prompt: {prompt}")
+                    print(f"Generated: {generated_text}")
+                    print("-" * 80)
+                except Exception as e:
+                    print(f"Error generating text for prompt {i}: {e}")
+
+        model.train()
+        print("=" * 80 + "\n")
+
+
 def main():
     # Check if resume is enabled via environment variable
     resume = os.environ.get("RESUME", "") == "1"
@@ -76,30 +145,31 @@ def main():
     acc = Accelerator()
     if acc.is_main_process:
         # Main process creates dataset cache
-        packed_dataset_train, packed_dataset_val = prepare_dataset()
+        packed_dataset_train = prepare_dataset()
     acc.wait_for_everyone()
     if not acc.is_main_process:
         # Other processes load from cache
-        packed_dataset_train, packed_dataset_val = prepare_dataset()
-
-    # Determine output directory
-    output_dir = "./Veloce-1B"
+        packed_dataset_train = prepare_dataset()
 
     # Initialize or load the model
-    checkpoint = None
+    checkpoint_dir = "./checkpoints"
     if resume:
         # Clone repository from Hugging Face Hub (only main process)
         if acc.is_main_process:
-            print("Cloning repository...")
+            print(
+                f"Downloading checkpoint from {os.environ.get('RESUME_FROM_CHECKPOINT')}..."
+            )
             snapshot_download(
                 repo_id="hayago/Veloce-1B",
-                local_dir=output_dir,
+                allow_patterns=os.environ.get("RESUME_FROM_CHECKPOINT") + "/**",
+                local_dir=checkpoint_dir,
                 local_dir_use_symlinks=False,
             )
-            print("Repository cloned successfully")
+            print("Checkpoint downloaded successfully")
         acc.wait_for_everyone()
-        checkpoint = get_last_checkpoint(output_dir)
-        model = LlamaForCausalLM.from_pretrained(checkpoint)
+        model = LlamaForCausalLM.from_pretrained(
+            os.path.join(checkpoint_dir, os.environ.get("RESUME_FROM_CHECKPOINT"))
+        )
     else:
         model_config = AutoConfig.from_pretrained(
             "meta-llama/Llama-3.2-1B",
@@ -111,39 +181,46 @@ def main():
 
     # Training arguments
     training_args = TrainingArguments(
-        output_dir=output_dir,
+        output_dir="./Veloce-1B",
         per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
         gradient_accumulation_steps=64,
-        warmup_steps=4,  # -> 40
+        warmup_ratio=0.03,
         lr_scheduler_type="cosine",
         weight_decay=0.1,
-        fp16=True,
+        bf16=True,
         logging_strategy="steps",
-        logging_steps=2,  # -> 20
-        eval_strategy="steps",
+        logging_steps=20,
         logging_first_step=True,
-        eval_steps=10,  # -> 100
-        num_train_epochs=5,  # -> 5
-        learning_rate=5e-4,
-        save_steps=10,  # -> 100
+        num_train_epochs=5,
+        learning_rate=1e-4,
+        save_steps=100,
         report_to="wandb",
         push_to_hub=True,
         hub_strategy="all_checkpoints",
+        eval_strategy="no",
     )
 
     if acc.is_main_process:
         log_training_info(len(packed_dataset_train), training_args)
+
+    # Create generation callback
+    generation_callback = GenerationCallback(sp, acc)
 
     # Train the model
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=packed_dataset_train,
-        eval_dataset=packed_dataset_val,
         data_collator=DefaultDataCollator(),
+        callbacks=[generation_callback],
     )
-    trainer.train(resume_from_checkpoint=checkpoint if resume else None)
+    trainer.train(
+        resume_from_checkpoint=os.path.join(
+            checkpoint_dir, os.environ.get("RESUME_FROM_CHECKPOINT")
+        )
+        if resume
+        else None
+    )
 
 
 if __name__ == "__main__":

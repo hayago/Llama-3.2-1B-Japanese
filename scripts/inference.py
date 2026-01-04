@@ -2,7 +2,7 @@ import sentencepiece as spm
 from transformers import LlamaForCausalLM
 import torch
 
-sp = spm.SentencePieceProcessor(model_file="data/sentencepiece/out.model")
+sp = spm.SentencePieceProcessor(model_file="sentencepiece/out.model")
 
 input_texts = [
     "今日は朝から雨が降っていて、",
@@ -17,7 +17,8 @@ for text in input_texts:
     input_ids = [sp.bos_id()] + input_ids
     input_ids = torch.tensor(input_ids).unsqueeze(0)
 
-    model = LlamaForCausalLM.from_pretrained("Llama-3.2-1B-Japanese")
+    model = LlamaForCausalLM.from_pretrained("hayago/Veloce-1B")
+
     outputs = model.generate(input_ids)
     generated_ids = outputs[0].tolist()
     generated_text = sp.decode(generated_ids)

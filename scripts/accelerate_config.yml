@@ -6,7 +6,7 @@ image_uri: 763104351884.dkr.ecr.us-east-1.amazonaws.com/huggingface-pytorch-trai
 enable_cpu_affinity: false
 gpu_ids: all
 iam_role_name: sagemaker-training-job-role-for-llama-3-2-1b-japanese
-mixed_precision: fp16
+mixed_precision: bf16
 num_machines: 1
 profile: XXXXX
 py_version: py311
@@ -23,3 +23,4 @@ additional_args:
     WANDB_API_KEY: "XXXXX" # Don't commit this to the repository
     WANDB_PROJECT: "veloce-1b-training-job"
     RESUME: "0" # 0: No resume, 1: Resume
+    # RESUME_FROM_CHECKPOINT: "checkpoint-30"
