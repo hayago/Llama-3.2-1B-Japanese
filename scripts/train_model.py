@@ -17,6 +17,9 @@ def preprocess(examples) -> dict:
     # Encode the text into ids and add BOS and EOS
     all_ids = []
     for ids in sp.encode_as_ids(examples["text"]):
+        if len(ids) == 0:
+            continue
+
         all_ids.extend([sp.bos_id()] + ids + [sp.eos_id()])
 
     # Pack the all_ids into chunks of context_length
@@ -34,7 +37,7 @@ def preprocess(examples) -> dict:
 
 def prepare_dataset():
     # Load the dataset
-    dataset_name = "hayago/llm-pretrain-dataset-5B-japanese"
+    dataset_name = "range3/cc100-ja"
     dataset = load_dataset(dataset_name)
 
     train_dataset = dataset["train"]
@@ -161,7 +164,7 @@ def main():
                 f"Downloading checkpoint from {os.environ.get('RESUME_FROM_CHECKPOINT')}..."
             )
             snapshot_download(
-                repo_id="hayago/Veloce-100M",
+                repo_id="hayago/Veloce-100M-v2",
                 allow_patterns=os.environ.get("RESUME_FROM_CHECKPOINT") + "/**",
                 local_dir=checkpoint_dir,
                 local_dir_use_symlinks=False,
@@ -196,24 +199,28 @@ def main():
         print(f"Total parameters: {total_params:,}")
 
     # Training arguments
+    # ローカルテスト用の設定
+    is_test = os.environ.get("TEST_MODE", "") == "1"
+
     training_args = TrainingArguments(
-        output_dir="./Veloce-100M",
+        output_dir="./Veloce-100M-v2",
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=8,
-        warmup_ratio=0.05,
+        gradient_accumulation_steps=8 if not is_test else 1,
+        warmup_ratio=0.01,
         lr_scheduler_type="cosine",
         weight_decay=0.001,
         bf16=True,
         logging_strategy="steps",
-        logging_steps=50,
+        logging_steps=50 if not is_test else 1,
         logging_first_step=True,
         num_train_epochs=1,
         learning_rate=1e-4,
-        save_steps=500,
-        report_to="wandb",
-        push_to_hub=True,
+        save_steps=500 if not is_test else 5,
+        report_to="wandb" if not is_test else "none",
+        push_to_hub=True if not is_test else False,
         hub_strategy="all_checkpoints",
         eval_strategy="no",
+        max_steps=-1 if not is_test else 10,
     )
 
     if acc.is_main_process:
