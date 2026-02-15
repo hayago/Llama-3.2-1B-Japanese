@@ -15,9 +15,12 @@ region: us-east-1
 transformers_version: 4.49.0
 use_cpu: false
 additional_args:
+  volume_size: 30
   use_spot_instances: True
   max_run: 360000 # 100 hours
   max_wait: 360000 # Must be greater than or equal to max_run when using spot instances
+  sagemaker_inputs:
+    training: s3://YOUR-BUCKET/path/to/dataset
   environment:
     HF_TOKEN: "XXXXX" # Don't commit this to the repository
     WANDB_API_KEY: "XXXXX" # Don't commit this to the repository

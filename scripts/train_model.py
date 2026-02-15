@@ -10,59 +10,16 @@ from transformers import Trainer, TrainingArguments, TrainerCallback
 
 
 # Load the sentencepiece model
-sp = spm.SentencePieceProcessor(model_file="sentencepiece/out.model")
+SP_MODEL_PATH = os.path.join(os.path.dirname(__file__), "sentencepiece", "out.model")
+sp = spm.SentencePieceProcessor(model_file=SP_MODEL_PATH)
 
 
-def preprocess(examples) -> dict:
-    # Encode the text into ids and add BOS and EOS
-    all_ids = []
-    for ids in sp.encode_as_ids(examples["text"]):
-        if len(ids) == 0:
-            continue
-
-        all_ids.extend([sp.bos_id()] + ids + [sp.eos_id()])
-
-    # Pack the all_ids into chunks of context_length
-    context_length = 2048
-    total_length = (len(all_ids) // context_length) * context_length
-    chunks = [
-        all_ids[i : i + context_length] for i in range(0, total_length, context_length)
-    ]
-
-    return {
-        "input_ids": chunks,
-        "labels": chunks.copy(),  # labels are the same as input_ids for causal language modeling
-    }
-
-
-def prepare_dataset():
-    # Load the dataset
-    dataset_name = "range3/cc100-ja"
-    dataset = load_dataset(dataset_name)
-
-    train_dataset = dataset["train"]
-
-    # Preprocess the dataset
-    # Use fixed batch_size to ensure consistent chunk counts per batch
-    packed_dataset_train = train_dataset.map(
-        preprocess, batched=True, remove_columns=train_dataset.column_names, drop_last_batch=True
-    )
-
-    return packed_dataset_train
-
-
-def log_training_info(num_samples, training_args):
+def log_training_info(max_steps, training_args):
     batch_size = training_args.per_device_train_batch_size
     gradient_accumulation_steps = training_args.gradient_accumulation_steps
-    num_epochs = training_args.num_train_epochs
-    steps_per_epoch = num_samples // (batch_size * gradient_accumulation_steps)
-    total_steps = steps_per_epoch * num_epochs
-    print(f"Number of samples: {num_samples}")
+    print(f"Max steps: {max_steps}")
     print(f"Batch size: {batch_size}")
     print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
-    print(f"Number of epochs: {num_epochs}")
-    print(f"Steps per epoch: {steps_per_epoch}")
-    print(f"Total steps: {total_steps}")
 
 
 # Evaluation prompts for text generation
@@ -125,6 +82,9 @@ class GenerationCallback(TrainerCallback):
                     outputs = model.generate(
                         input_ids_tensor,
                         max_new_tokens=100,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.9,
                     )
 
                     # Decode the generated text
@@ -145,15 +105,13 @@ def main():
     # Check if resume is enabled via environment variable
     resume = os.environ.get("RESUME", "") == "1"
 
-    # Prepare the dataset with caching for distributed training
+    # Load the preprocessed dataset from Hugging Face Hub
     acc = Accelerator()
-    if acc.is_main_process:
-        # Main process creates dataset cache
-        packed_dataset_train = prepare_dataset()
-    acc.wait_for_everyone()
-    if not acc.is_main_process:
-        # Other processes load from cache
-        packed_dataset_train = prepare_dataset()
+    packed_dataset_train = load_dataset("hayago/cc100-ja-packed-2048", split="train", streaming=True)
+    packed_dataset_train = packed_dataset_train.rename_column("chunks", "input_ids")
+    packed_dataset_train = packed_dataset_train.map(
+        lambda x: {"labels": x["input_ids"]},
+    )
 
     # Initialize or load the model
     checkpoint_dir = "./checkpoints"
@@ -213,18 +171,17 @@ def main():
         logging_strategy="steps",
         logging_steps=50 if not is_test else 1,
         logging_first_step=True,
-        num_train_epochs=1,
         learning_rate=1e-4,
         save_steps=500 if not is_test else 5,
         report_to="wandb" if not is_test else "none",
         push_to_hub=True if not is_test else False,
         hub_strategy="all_checkpoints",
         eval_strategy="no",
-        max_steps=-1 if not is_test else 10,
+        max_steps=100000 if not is_test else 10,
     )
 
     if acc.is_main_process:
-        log_training_info(len(packed_dataset_train), training_args)
+        log_training_info(training_args.max_steps, training_args)
 
     # Create generation callback
     generation_callback = GenerationCallback(sp, acc)
