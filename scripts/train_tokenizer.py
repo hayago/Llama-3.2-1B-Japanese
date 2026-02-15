@@ -1,12 +1,14 @@
 import io
 import os
+import random
 import sentencepiece as spm
 from datasets import load_dataset
 
-# Load the dataset and create an iterator over the text
-dataset = load_dataset("hayago/llm-pretrain-dataset-2B-japanese", streaming=True)
+# Load the dataset and sample 20% for tokenizer training
+dataset = load_dataset("hayago/cc100-ja-fork", streaming=True)
 train_dataset = dataset["train"]
-sentence_it = (sample["text"] for sample in train_dataset)
+random.seed(42)
+sentence_it = (sample["text"] for sample in train_dataset if random.random() < 0.2)
 
 # Create a BytesIO object to store the model
 model = io.BytesIO()
