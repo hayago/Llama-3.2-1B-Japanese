@@ -4,7 +4,7 @@ import sentencepiece as spm
 from datasets import load_dataset
 
 # Load the first 20% of the dataset for tokenizer training
-train_dataset = load_dataset("hayago/cc100-ja-fork", split="train[:10%]")
+train_dataset = load_dataset("hayago/cc100-ja-fork", split="train[:1%]")
 sentence_it = (sample["text"] for sample in train_dataset)
 
 # Create a BytesIO object to store the model
