@@ -30,8 +30,7 @@ def preprocess(examples) -> dict:
 
 
 if __name__ == "__main__":
-    # train_dataset = load_dataset("hayago/cc100-ja-fork", split="train")
-    train_dataset = load_dataset(os.path.expanduser("~/workspace/hobby/dataset/cc100-ja"), split="train")
+    train_dataset = load_dataset("hayago/cc100-ja-fork", split="train")
 
     packed_dataset_train = train_dataset.map(
         preprocess, batched=True, remove_columns=train_dataset.column_names, drop_last_batch=True
