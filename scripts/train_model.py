@@ -177,7 +177,7 @@ def main():
         push_to_hub=True if not is_test else False,
         hub_strategy="all_checkpoints",
         eval_strategy="no",
-        max_steps=100000 if not is_test else 10,
+        max_steps=86193 if not is_test else 10,
     )
 
     if acc.is_main_process:
