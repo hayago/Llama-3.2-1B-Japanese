@@ -167,7 +167,7 @@ def main():
         warmup_ratio=0.01,
         lr_scheduler_type="cosine",
         weight_decay=0.001,
-        fp16=True,
+        bf16=True,
         logging_strategy="steps",
         logging_steps=50 if not is_test else 1,
         logging_first_step=True,
